@@ -1,0 +1,33 @@
+{
+  "name": "YouTube Smart Transcript",
+  "version": "1.8.1",
+  "manifest_version": 3,
+  "description": "Adds a better transcript and keyword summary to YouTube videos, amazing, right?.",
+  "host_permissions": [
+    "*://www.youtube.com/*",
+    "https://api.deepai.org/*"
+  ],
+  "permissions": [
+    "storage"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://www.youtube.com/watch*"],
+      "js": ["content.js"],
+      "css": ["bar_styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "48": "png1.png",
+    "128": "png1.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "yt-transcript-thing@my-addons.org"
+    }
+  }
+}
