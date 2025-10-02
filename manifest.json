@@ -1,19 +1,23 @@
 {
-  "manifest_version": 2,
-  "name": "YouTube Quick Downloader",
-  "version": "1.0.0",
-  "description": "Adds a red download button under YouTube videos for quick audio or 360p downloads.",
+  "name": "YouTube Smart Transcript",
+  "version": "1.8.1",
+  "manifest_version": 3,
+  "description": "Adds a better transcript and keyword summary to YouTube videos, amazing, right?.",
+  "host_permissions": [
+    "*://www.youtube.com/*",
+    "https://api.deepai.org/*"
+  ],
   "permissions": [
-    "downloads"
+    "storage"
   ],
   "background": {
-    "scripts": ["background.js"],
-    "persistent": false
+    "scripts": ["background.js"]
   },
   "content_scripts": [
     {
       "matches": ["*://www.youtube.com/watch*"],
       "js": ["content.js"],
+      "css": ["bar_styles.css"],
       "run_at": "document_idle"
     }
   ],
@@ -23,7 +27,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "yt-quick-download@example.com"
+      "id": "yt-transcript-thing@my-addons.org"
     }
   }
 }
