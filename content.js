@@ -1,388 +1,406 @@
-const runtime = typeof browser !== 'undefined' ? browser : chrome;
-const usesNativePromises = typeof browser !== 'undefined';
+var g_transcriptData = [];
+var keywordData = [];
+var currentLine = -1;
+let currentKeywordIdx = -1;
+let animFrameId = null;
+var activeTab = 'transcript';
+let keywordsAreLoading = false;
+let keywordsProcessed = false;
+let observer = null;
+let heartbeatTimer = null;
 
-let wrapper = null;
-let dropdown = null;
-let audioChoice = null;
-let videoChoice = null;
-let outsideClickHandlerAttached = false;
+const DEEPAI_HACK_URL = "https://api.deepai.org/hacking_is_a_serious_crime";
+const deepAiKey = "tryit-45613178969-7a1e9069d97386f14f496c969a224d58";
 
-let cachedInfo = null;
-let lastVideoId = null;
-let observerStarted = false;
 
-function sanitizeFileName(title) {
-  if (!title || typeof title !== 'string') {
-    return 'youtube-video';
-  }
-  const safe = title.replace(/[\\/:*?"<>|]+/g, '').trim();
-  return safe || 'youtube-video';
+function formatTime(t) {
+    const secs = Math.floor(t / 1000);
+    const mins = Math.floor(secs / 60);
+    const seconds = secs % 60;
+    return `[${String(mins).padStart(2, '0')}:${String(seconds).padStart(2, '0')}]`;
 }
 
-function ensureUi() {
-  const infoSection = document.querySelector('#info-contents');
-  if (!infoSection) {
-    return false;
-  }
-
-  if (wrapper && infoSection.contains(wrapper)) {
-    return true;
-  }
-
-  if (wrapper && wrapper.parentNode) {
-    wrapper.parentNode.removeChild(wrapper);
-  }
-
-  wrapper = document.createElement('div');
-  wrapper.style.display = 'inline-flex';
-  wrapper.style.flexDirection = 'column';
-  wrapper.style.alignItems = 'flex-start';
-  wrapper.style.position = 'relative';
-  wrapper.style.marginTop = '12px';
-
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = 'Download';
-  button.style.background = '#ff0000';
-  button.style.color = '#ffffff';
-  button.style.fontWeight = '600';
-  button.style.fontSize = '14px';
-  button.style.border = 'none';
-  button.style.borderRadius = '18px';
-  button.style.padding = '10px 20px';
-  button.style.cursor = 'pointer';
-  button.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.2)';
-  button.style.transition = 'background-color 0.2s ease';
-
-  button.addEventListener('mouseenter', () => {
-    button.style.background = '#cc0000';
-  });
-  button.addEventListener('mouseleave', () => {
-    button.style.background = '#ff0000';
-  });
-  button.addEventListener('click', event => {
-    event.stopPropagation();
-    toggleMenu();
-  });
-
-  dropdown = document.createElement('div');
-  dropdown.style.display = 'none';
-  dropdown.style.position = 'absolute';
-  dropdown.style.top = '48px';
-  dropdown.style.left = '0';
-  dropdown.style.background = '#202020';
-  dropdown.style.borderRadius = '8px';
-  dropdown.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.35)';
-  dropdown.style.padding = '8px 0';
-  dropdown.style.minWidth = '180px';
-  dropdown.style.zIndex = '9999';
-
-  audioChoice = createMenuButton('Download audio', () => handleDownload('audio'));
-  videoChoice = createMenuButton('Download 360p video', () => handleDownload('video'));
-
-  dropdown.appendChild(audioChoice);
-  dropdown.appendChild(videoChoice);
-
-  wrapper.appendChild(button);
-  wrapper.appendChild(dropdown);
-  infoSection.appendChild(wrapper);
-
-  if (!outsideClickHandlerAttached) {
-    document.addEventListener('click', event => {
-      if (!dropdown || !wrapper) {
-        return;
-      }
-      if (wrapper.contains(event.target)) {
-        return;
-      }
-      hideMenu();
+async function callAI(messages) {
+    return new Promise((resolve, reject) => {
+        try {
+            chrome.runtime.sendMessage({
+                type: 'callAI',
+                messages,
+                aiConfig: {
+                    url: DEEPAI_HACK_URL,
+                    apiKey: deepAiKey
+                }
+            }, (response) => {
+                if (chrome.runtime.lastError) {
+                    reject(new Error(chrome.runtime.lastError.message));
+                } else if (response && response.success) {
+                    resolve(response.data);
+                } else {
+                    reject(new Error(response ? response.error : "Unknown error from background script."));
+                }
+            });
+        } catch (e) {
+            reject(new Error(`Failed to send message: ${e.message}`));
+        }
     });
-    outsideClickHandlerAttached = true;
-  }
-
-  return true;
 }
 
-function createMenuButton(label, handler) {
-  const option = document.createElement('button');
-  option.type = 'button';
-  option.textContent = label;
-  option.style.background = 'transparent';
-  option.style.border = 'none';
-  option.style.color = '#ffffff';
-  option.style.textAlign = 'left';
-  option.style.width = '100%';
-  option.style.padding = '10px 16px';
-  option.style.fontSize = '13px';
-  option.style.cursor = 'pointer';
-
-  option.addEventListener('mouseenter', () => {
-    option.style.background = 'rgba(255, 255, 255, 0.1)';
-  });
-  option.addEventListener('mouseleave', () => {
-    option.style.background = 'transparent';
-  });
-  option.addEventListener('click', () => {
-    hideMenu();
-    handler();
-  });
-
-  return option;
+function startHeartbeat() {
+    if(heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(() => {
+        // console.log("ping bg...");
+        chrome.runtime.sendMessage({ type: 'ping' }, (res) => {
+            if (chrome.runtime.lastError) {
+                console.warn("Heartbeat failed, bg script might be dead.", chrome.runtime.lastError.message);
+                if(heartbeatTimer) clearInterval(heartbeatTimer);
+                heartbeatTimer = null;
+            }
+        });
+    }, 15000); // 15 seconds
 }
 
-function toggleMenu() {
-  if (!dropdown) {
-    return;
-  }
-
-  if (dropdown.style.display === 'none') {
-    updateMenuState();
-    dropdown.style.display = 'flex';
-    dropdown.style.flexDirection = 'column';
-  } else {
-    dropdown.style.display = 'none';
-  }
-}
-
-function hideMenu() {
-  if (dropdown) {
-    dropdown.style.display = 'none';
-  }
-}
-
-function updateMenuState() {
-  if (!cachedInfo) {
-    setOptionState(audioChoice, false, 'Audio not found');
-    setOptionState(videoChoice, false, '360p video not found');
-    return;
-  }
-
-  const audioReady = Boolean(cachedInfo.audio && extractDownloadUrl(cachedInfo.audio));
-  const videoReady = Boolean(cachedInfo.video && extractDownloadUrl(cachedInfo.video));
-
-  setOptionState(audioChoice, audioReady, audioReady ? 'Download audio' : 'Audio not found');
-  setOptionState(videoChoice, videoReady, videoReady ? 'Download 360p video' : '360p video not found');
-}
-
-function setOptionState(option, enabled, label) {
-  if (!option) {
-    return;
-  }
-  option.textContent = label;
-  option.disabled = !enabled;
-  option.style.opacity = enabled ? '1' : '0.5';
-  option.style.cursor = enabled ? 'pointer' : 'not-allowed';
-}
-
-function getPlayerResponse() {
-  const playerElement = document.querySelector('ytd-player');
-  if (playerElement && typeof playerElement.getPlayerResponse === 'function') {
-    const response = playerElement.getPlayerResponse();
-    if (response && response.streamingData) {
-      return response;
+function stopHeartbeat() {
+    if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
     }
-  }
+}
 
-  if (window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.streamingData) {
-    return window.ytInitialPlayerResponse;
-  }
 
-  if (window.ytplayer && window.ytplayer.config && window.ytplayer.config.args && window.ytplayer.config.args.player_response) {
+async function analyzeKeywords() {
+    if (keywordsAreLoading || keywordsProcessed) return;
+
+    console.log("Starting keyword analysis...");
+    keywordsAreLoading = true;
+    startHeartbeat();
+    const keywordContainer = document.getElementById('keywords-content');
+
+    keywordData = [];
+    const processedWords = new Set();
+
     try {
-      const parsed = JSON.parse(window.ytplayer.config.args.player_response);
-      if (parsed && parsed.streamingData) {
-        return parsed;
-      }
+        const fullText = g_transcriptData.map(line => line.text).join(' ');
+        if (fullText.length < 50) {
+            throw new Error("Transcript too short.");
+        }
+
+        const CHUNK_SIZE = 2500;
+        const chunks = [];
+        for (let i = 0; i < fullText.length; i += CHUNK_SIZE) {
+            chunks.push(fullText.substring(i, i + CHUNK_SIZE));
+        }
+
+        for (let i = 0; i < chunks.length; i++) {
+            if (keywordContainer) keywordContainer.innerHTML = `<div>Analyzing text chunk ${i + 1} of ${chunks.length}...</div>`;
+            renderKeywords(); // Make sure the old keywords are still visible under the status
+
+            const prompt_for_words = `You are analyzing text for English learners at B2 level. Find 5-10 difficult/advanced words or phrases (2-3 words) from this text that a B2 learner would struggle with. Return ONLY the words/phrases separated by commas, nothing else. No explanations, no sentences, just: word1, phrase one, word2\n\nText: ${chunks[i]}`;
+
+            const wordsResult = await callAI([{ role: "user", content: prompt_for_words }]);
+            const foundWords = wordsResult.split(/[,\n]/).map(w => w.trim().toLowerCase()).filter(w => w.length > 2 && w);
+            const newWords = foundWords.filter(word => !processedWords.has(word));
+
+            if (newWords.length === 0) continue;
+            
+            let synonymMap = {};
+            try {
+                const synonymsResult = await callAI([{ role: "user", content: `For the following list, provide a simpler synonym for each. Return a single valid JSON object where the key is the original word/phrase and the value is the simpler synonym. List: ${newWords.join(', ')}` }]);
+                const jsonMatch = synonymsResult.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) {
+                    console.error(`Synonym prompt returned no JSON block. Got: "${synonymsResult}"`);
+                    continue;
+                }
+                synonymMap = JSON.parse(jsonMatch[0]);
+
+            } catch (jsonError) {
+                // AI gave us bad JSON, what a surprise. Just log it and skip this chunk.
+                console.warn("Could not parse JSON from AI, skipping this chunk.", jsonError);
+                continue; 
+            }
+
+            for (const original of newWords) {
+                if (synonymMap[original] && !processedWords.has(original)) {
+                    const line = g_transcriptData.find(l => l.text.toLowerCase().includes(original));
+                    if (line) {
+                        keywordData.push({ startTime: line.startTime, original: original, synonym: synonymMap[original] });
+                        processedWords.add(original);
+                    }
+                }
+            }
+            renderKeywords(); // update ui
+        }
+        keywordsProcessed = true;
+
     } catch (error) {
-      // ignore invalid JSON
+        console.error("Keyword processing failed:", error);
+        if (keywordContainer) keywordContainer.innerHTML = `<div>Error: ${error.message}</div>`;
+    } finally {
+        keywordsAreLoading = false;
+        stopHeartbeat();
+        if (keywordData.length === 0 && keywordContainer && !keywordsProcessed) {
+             keywordContainer.innerHTML = '<div>No complex keywords found.</div>';
+        }
+        // Final render to clean up the "analyzing..." message
+        if (keywordContainer) {
+            const statusDiv = keywordContainer.querySelector('div:first-child');
+            if (statusDiv && statusDiv.innerText.startsWith('Analyzing')) {
+                 renderKeywords();
+            }
+        }
     }
-  }
-
-  return null;
 }
 
-function chooseFormats(response) {
-  if (!response || !response.streamingData || !response.videoDetails) {
-    cachedInfo = null;
-    return;
-  }
 
-  const { videoDetails, streamingData } = response;
-  const title = videoDetails.title || 'YouTube video';
-  const formats = Array.isArray(streamingData.formats) ? streamingData.formats : [];
-  const adaptive = Array.isArray(streamingData.adaptiveFormats) ? streamingData.adaptiveFormats : [];
+function renderKeywords() {
+    const el = document.getElementById('keywords-content');
+    if (!el) return;
 
-  const audioFormats = adaptive.filter(item => typeof item.mimeType === 'string' && item.mimeType.includes('audio/'));
-  audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-  const bestAudio = audioFormats.length > 0 ? audioFormats[0] : null;
+    const statusDiv = el.querySelector('div:first-child');
+    const statusHTML = statusDiv && statusDiv.innerText.startsWith('Analyzing') ? statusDiv.outerHTML : '';
+    
+    // Clear everything BUT the status message and the already-found keywords
+    el.innerHTML = statusHTML;
 
-  let video360 = formats.find(item => item.qualityLabel === '360p');
-  if (!video360) {
-    video360 = adaptive.find(item => item.qualityLabel === '360p' && typeof item.mimeType === 'string' && item.mimeType.includes('video/')) || null;
-  }
+    keywordData.sort((a, b) => a.startTime - b.startTime);
 
-  cachedInfo = {
-    title,
-    audio: bestAudio,
-    video: video360
-  };
-}
-
-function extractDownloadUrl(format) {
-  if (!format) {
-    return null;
-  }
-
-  if (format.url) {
-    return format.url;
-  }
-
-  const cipherText = format.signatureCipher || format.cipher;
-  if (!cipherText) {
-    return null;
-  }
-
-  const params = new URLSearchParams(cipherText);
-  const baseUrl = params.get('url');
-  const signature = params.get('sig') || params.get('signature');
-  const sp = params.get('sp') || 'signature';
-
-  if (baseUrl && signature) {
-    return `${baseUrl}&${sp}=${signature}`;
-  }
-
-  if (baseUrl && !params.get('s')) {
-    return baseUrl;
-  }
-
-  return null;
-}
-
-function determineExtension(format, kind) {
-  if (!format || !format.mimeType) {
-    return kind === 'audio' ? 'mp3' : 'mp4';
-  }
-
-  const mime = format.mimeType.toLowerCase();
-  if (mime.includes('webm')) {
-    return 'webm';
-  }
-  if (mime.includes('mp4')) {
-    return kind === 'audio' ? 'm4a' : 'mp4';
-  }
-  if (mime.includes('ogg')) {
-    return 'ogg';
-  }
-  if (mime.includes('mpeg')) {
-    return 'mp3';
-  }
-
-  return kind === 'audio' ? 'mp3' : 'mp4';
-}
-
-function handleDownload(kind) {
-  if (!cachedInfo) {
-    alert('Video information is not ready yet.');
-    return;
-  }
-
-  const target = kind === 'audio' ? cachedInfo.audio : cachedInfo.video;
-  if (!target) {
-    alert(kind === 'audio' ? 'Audio stream not available.' : '360p video stream not available.');
-    return;
-  }
-
-  const url = extractDownloadUrl(target);
-  if (!url) {
-    alert('Download URL is not available for this stream.');
-    return;
-  }
-
-  const extension = determineExtension(target, kind);
-  const filename = `${sanitizeFileName(cachedInfo.title)}-${kind}.${extension}`;
-
-  sendMessage({ action: 'download', url, filename })
-    .then(response => {
-      if (response && response.success === false) {
-        alert(`Download failed: ${response.error}`);
-      }
-    })
-    .catch(error => {
-      const message = error && error.message ? error.message : String(error);
-      alert(`Download failed: ${message}`);
+    keywordData.forEach((item, index) => {
+        const div = document.createElement('div');
+        div.className = 'keyword_line';
+        div.dataset.index = index;
+        div.dataset.starttime = item.startTime;
+        div.innerHTML = `${formatTime(item.startTime)} <span class="keyword-original">${item.original}</span> → <span class="keyword-synonym">${item.synonym}</span>`;
+        el.appendChild(div);
     });
 }
 
-function sendMessage(message) {
-  if (usesNativePromises) {
-    return runtime.runtime.sendMessage(message);
-  }
 
-  return new Promise((resolve, reject) => {
-    runtime.runtime.sendMessage(message, response => {
-      if (runtime.runtime.lastError) {
-        reject(new Error(runtime.runtime.lastError.message));
-        return;
-      }
-      resolve(response);
+function renderTranscript() {
+    const el = document.getElementById('transcript-content');
+    if (!el) return;
+    el.innerHTML = '';
+    g_transcriptData.forEach((item, index) => {
+        const div = document.createElement('div');
+        div.className = 'transcript_line';
+        div.dataset.index = index;
+        div.innerText = `${formatTime(item.startTime)} ${item.text}`;
+        el.appendChild(div);
     });
-  });
 }
 
-function refresh() {
-  if (!ensureUi()) {
-    cachedInfo = null;
-    updateMenuState();
-    return;
-  }
 
-  const response = getPlayerResponse();
-  if (!response || !response.videoDetails) {
-    cachedInfo = null;
-    updateMenuState();
-    return;
-  }
+function updateHighlight() {
+    const video = document.querySelector('video');
+    if (!video) return null;
+    const cTime = video.currentTime * 1000;
 
-  const videoId = response.videoDetails.videoId || null;
-  if (videoId && videoId === lastVideoId && cachedInfo) {
-    updateMenuState();
-    return;
-  }
+    if (activeTab === 'transcript') {
+        const lines = document.querySelectorAll('.transcript_line');
+        if (lines.length === 0 || g_transcriptData.length === 0) return null;
+        let newIdx = g_transcriptData.findIndex((line, i) => {
+            const nextLine = g_transcriptData[i + 1];
+            return cTime >= line.startTime && (!nextLine || cTime < nextLine.startTime);
+        });
+        if (newIdx !== -1 && newIdx !== currentLine) {
+            if (currentLine !== -1 && lines[currentLine]) lines[currentLine].classList.remove('highlight');
+            if (lines[newIdx]) lines[newIdx].classList.add('highlight');
+            currentLine = newIdx;
+            return { element: lines[newIdx] };
+        }
+    } else if (activeTab === 'keywords') {
+        const lines = document.querySelectorAll('.keyword_line');
+        if (lines.length === 0 || keywordData.length === 0) return null;
+        
+        let newIdx = -1;
+        for (let i = keywordData.length - 1; i >= 0; i--) {
+            if (cTime >= keywordData[i].startTime) {
+                newIdx = i;
+                break;
+            }
+        }
 
-  lastVideoId = videoId;
-  chooseFormats(response);
-  updateMenuState();
+        if (newIdx !== -1 && newIdx !== currentKeywordIdx) {
+            if (currentKeywordIdx !== -1 && lines[currentKeywordIdx]) lines[currentKeywordIdx].classList.remove('highlight');
+            if (lines[newIdx]) lines[newIdx].classList.add('highlight');
+            currentKeywordIdx = newIdx;
+            return { element: lines[newIdx] };
+        }
+    }
+    return null;
 }
 
-function startObserver() {
-  if (observerStarted) {
-    return;
-  }
-  const watchFlexy = document.querySelector('ytd-watch-flexy');
-  if (!watchFlexy) {
-    return;
-  }
+const animationLoop = () => {
+    const updateInfo = updateHighlight();
+    if (updateInfo && updateInfo.element) {
+        const container = document.getElementById('bar-content');
+        const bar = document.getElementById('yt-smart-bar');
+        if (container && bar && !bar.classList.contains('collapsed')) {
+            const targetScroll = updateInfo.element.offsetTop - (container.clientHeight / 2) + (updateInfo.element.clientHeight / 2);
+            container.scrollTop = targetScroll;
+        }
+    }
+    animFrameId = requestAnimationFrame(animationLoop);
+};
 
-  const observer = new MutationObserver(() => {
-    refresh();
-  });
-  observer.observe(watchFlexy, { childList: true, subtree: true });
-  observerStarted = true;
+const startLoop = () => { if (animFrameId) cancelAnimationFrame(animFrameId); animFrameId = requestAnimationFrame(animationLoop); };
+const stopLoop = () => { if (animFrameId) { cancelAnimationFrame(animFrameId); animFrameId = null; }};
+
+function setupVideoSync() {
+    const video = document.querySelector('video');
+    if (!video || video.dataset.sync) return;
+    video.dataset.sync = 'true';
+    video.addEventListener('play', startLoop);
+    video.addEventListener('pause', stopLoop);
+    video.addEventListener('ended', stopLoop);
+    video.addEventListener('seeked', updateHighlight);
+    if (!video.paused) startLoop();
 }
 
-function init() {
-  refresh();
-  startObserver();
+function injectUI() {
+    if (document.getElementById('yt-smart-bar')) return;
+    const target = document.querySelector('#secondary-inner');
+    if (!target) { setTimeout(injectUI, 500); return; }
+
+    const bar = document.createElement('div');
+    bar.id = 'yt-smart-bar';
+    bar.innerHTML = `
+        <div id="yt-bar-header">
+            <div class="bar_tabs">
+                <span class="bar_tab_item active" id="transcript-tab">Transcript</span>
+                <span class="bar_tab_item" id="keywords-tab">Keywords</span>
+            </div>
+            <span class="collapse_btn">▲</span>
+        </div>
+        <div id="bar-content">
+            <div class="content-pane active" id="transcript-content">Loading transcript...</div>
+            <div class="content-pane" id="keywords-content">Click Keywords tab to analyze...</div>
+        </div>
+    `;
+    target.prepend(bar);
+
+    bar.querySelector('#transcript-tab').addEventListener('click', () => {
+        activeTab = 'transcript';
+        bar.querySelector('#transcript-tab').classList.add('active');
+        bar.querySelector('#keywords-tab').classList.remove('active');
+        bar.querySelector('#transcript-content').classList.add('active');
+        bar.querySelector('#keywords-content').classList.remove('active');
+    });
+    bar.querySelector('#keywords-tab').addEventListener('click', () => {
+        activeTab = 'keywords';
+        bar.querySelector('#keywords-tab').classList.add('active');
+        bar.querySelector('#transcript-tab').classList.remove('active');
+        bar.querySelector('#keywords-content').classList.add('active');
+        bar.querySelector('#transcript-content').classList.remove('active');
+        if (g_transcriptData.length > 0) analyzeKeywords();
+        else bar.querySelector('#keywords-content').innerHTML = '<div>Load transcript first.</div>';
+    });
+    bar.querySelector('.collapse_btn').addEventListener('click', (e) => {
+        bar.classList.toggle('collapsed');
+        e.target.textContent = bar.classList.contains('collapsed') ? '▼' : '▲';
+    });
+    bar.querySelector('#bar-content').addEventListener('click', (event) => {
+        const lineEl = event.target.closest('.transcript_line, .keyword_line');
+        if (!lineEl) return;
+        let startTime;
+        if (lineEl.classList.contains('transcript_line')) {
+            startTime = g_transcriptData[parseInt(lineEl.dataset.index, 10)]?.startTime;
+        } else {
+            startTime = parseInt(lineEl.dataset.starttime, 10);
+        }
+        if (startTime !== undefined) {
+            const vid = document.querySelector('video');
+            if (vid) { vid.currentTime = startTime / 1000; vid.play(); }
+        }
+    });
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', init);
-} else {
-  init();
+function resetState() {
+    console.log("New YT page, resetting...");
+    stopLoop();
+    stopHeartbeat();
+    if (observer) observer.disconnect();
+
+    g_transcriptData = [];
+    keywordData = [];
+    currentLine = -1;
+    currentKeywordIdx = -1;
+    keywordsProcessed = false;
+    keywordsAreLoading = false;
+
+    const bar = document.getElementById('yt-smart-bar');
+    if (bar) {
+        bar.querySelector('#transcript-content').innerHTML = 'Loading transcript...';
+        bar.querySelector('#keywords-content').innerHTML = 'Click Keywords tab to analyze...';
+    } else {
+        injectUI();
+    }
 }
 
-window.addEventListener('yt-navigate-finish', () => {
-  setTimeout(refresh, 600);
+async function findTranscript() {
+    if (g_transcriptData.length > 0) return true;
+    console.log("Trying to find transcript...");
+
+    const cc_button = document.querySelector('.ytp-subtitles-button');
+    if (!cc_button) return false;
+
+    const is_on = cc_button.getAttribute('aria-pressed') === 'true';
+    if (is_on) {
+        return true; // it should load automatically
+    }
+
+    // click it on and off to trigger the API call for timedtext
+    cc_button.click();
+    await new Promise(r => setTimeout(r, 100));
+    cc_button.click();
+    return true;
+}
+
+function initialize() {
+    injectUI();
+    setupVideoSync();
+
+    let foundIt = false;
+
+    observer = new PerformanceObserver((list) => {
+        if (foundIt) return;
+        const entry = list.getEntries().find(e => e.name.includes("youtube.com/api/timedtext"));
+        if (entry) {
+            foundIt = true;
+            console.log("Intercepted transcript API call:", entry.name);
+            observer.disconnect();
+            fetch(entry.name)
+                .then(res => res.text())
+                .then(text => {
+                    const data = JSON.parse(text);
+                    if (data.events) {
+                        g_transcriptData = data.events.filter(ev => ev.segs).map(ev => ({ startTime: ev.tStartMs, text: ev.segs.map(s => s.utf8).join('').trim() })).filter(line => line.text);
+                        renderTranscript();
+                        setupVideoSync();
+                    }
+                }).catch(e => {
+                    console.error("Failed to parse transcript:", e);
+                    const el = document.getElementById('transcript-content');
+                    if(el) el.innerText = "Error parsing transcript data.";
+                });
+        }
+    });
+    observer.observe({ type: 'resource', buffered: true });
+
+    setTimeout(() => {
+        if (!foundIt) {
+            console.log("Observer didn't find it, trying manual trigger.");
+            findTranscript();
+        }
+    }, 3500);
+}
+
+
+document.addEventListener('yt-navigate-finish', () => {
+    // YT is a single page app, need to re-init on navigation
+    setTimeout(() => {
+        resetState();
+        initialize();
+    }, 500);
 });
 
-setInterval(refresh, 3000);
+// first run
+initialize();
