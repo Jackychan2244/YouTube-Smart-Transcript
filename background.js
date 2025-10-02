@@ -1,72 +1,57 @@
-// background.js
+const api = typeof browser !== 'undefined' ? browser : chrome;
 
-const multipart_body_template = '------WebKitFormBoundaryVoldemort\r\n' +
-    'Content-Disposition: form-data; name="chat_style"\r\n\r\n' +
-    'chat\r\n' +
-    '------WebKitFormBoundaryVoldemort\r\n' +
-    'Content-Disposition: form-data; name="chatHistory"\r\n\r\n' +
-    '{history_json}\r\n' +
-    '------WebKitFormBoundaryVoldemort\r\n' +
-    'Content-Disposition: form-data; name="model"\r\n\r\n' +
-    'standard\r\n' +
-    '------WebKitFormBoundaryVoldemort\r\n' +
-    'Content-Disposition: form-data; name="hacker_is_stinky"\r\n\r\n' +
-    'very_stinky\r\n' +
-    '------WebKitFormBoundaryVoldemort--\r\n';
+api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.action !== 'download') {
+    return false;
+  }
 
-function makeDeepAiPayload(prompt) {
-    const chatHistory = [{ role: "user", content: prompt }];
-    const historyJson = JSON.stringify(chatHistory);
-    return multipart_body_template.replace("{history_json}", historyJson);
-}
+  const { url, filename } = message;
+  if (!url) {
+    sendResponse({ success: false, error: 'Missing download URL.' });
+    return false;
+  }
 
+  const details = {
+    url,
+    filename,
+    saveAs: true
+  };
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  let callbackFired = false;
 
-    if (msg.type === 'ping') {
-        // console.log("ping from content script");
-        sendResponse({ success: true, data: "pong" });
-        return;
-    }
+  try {
+    const maybePromise = api.downloads.download(details, downloadId => {
+      callbackFired = true;
+      if (api.runtime.lastError) {
+        sendResponse({ success: false, error: api.runtime.lastError.message });
+      } else {
+        sendResponse({ success: true, downloadId });
+      }
+    });
 
-    if (msg.type === 'callAI') {
-        const { messages, aiConfig } = msg;
-
-        const final_prompt = messages[0].content;
-        const reqBody = makeDeepAiPayload(final_prompt);
-
-        fetch(aiConfig.url, {
-            method: 'POST',
-            headers: {
-                'Host': 'api.deepai.org',
-                'Accept': '*/*',
-                'api-key': aiConfig.apiKey,
-                'Content-Type': 'multipart/form-data; boundary=----WebKitFormBoundaryVoldemort',
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15',
-                'Origin': 'https://deepai.org',
-                'Connection': 'keep-alive',
-                'Cookie': 'csrftoken=WIQ0uG573dO94lrZ3vuvDBYI3x18zcrf; user_sees_ads=false',
-            },
-            body: reqBody,
+    if (maybePromise && typeof maybePromise.then === 'function') {
+      maybePromise
+        .then(downloadId => {
+          if (!callbackFired) {
+            sendResponse({ success: true, downloadId });
+          }
         })
-        .then(res => {
-            if (!res.ok) {
-                return res.text().then(text => {
-                    throw new Error(`API returned ${res.status}: ${text}`);
-                });
-            }
-            return res.text();
-        })
-        .then(rawText => {
-            sendResponse({ success: true, data: rawText.trim() });
-        })
-        .catch(err => {
-            console.error("FETCH FAILED in background.js:", err);
-            sendResponse({ success: false, error: err.message });
+        .catch(error => {
+          if (!callbackFired) {
+            const message = error && error.message ? error.message : String(error);
+            sendResponse({ success: false, error: message });
+          }
         });
-
-        return true; // keep channel open for async response
+      return true;
     }
-});
 
-console.log("BG script running.");
+    if (!callbackFired) {
+      return true;
+    }
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    sendResponse({ success: false, error: message });
+  }
+
+  return true;
+});
